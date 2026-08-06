@@ -1,0 +1,132 @@
+name: Deploy Vue3 Frontend
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'package.json'
+      - 'vite.config.*'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '是否强制重新编译打包 (Build & Deploy)?'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  deploy-vue:
+    runs-on: [self-hosted, vue-builder]
+    timeout-minutes: 15
+
+    steps:
+      - name: Native Git Checkout with SSH
+        run: |
+          export PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:$PATH
+
+          echo "Cleaning up frontend workspace..."
+          find . -mindepth 1 -delete 2>/dev/null || true
+
+          echo "Cloning frontend repository via SSH..."
+          git clone --depth 1 -b master git@github.com:csdfv-beep/vue-miaosha.git .
+
+      - name: Frontend MD5 Fingerprint Detection
+        id: filter
+        run: |
+          export PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:$PATH
+
+          CACHE_DIR="/tmp/vue_deploy_cache"
+          sudo mkdir -p $CACHE_DIR
+          sudo chown -R $(whoami):$(whoami) $CACHE_DIR
+
+          OLD_FINGERPRINT="$CACHE_DIR/last_frontend_md5.txt"
+
+          CURRENT_FINGERPRINT=$(find src/ public/ package.json -type f 2>/dev/null | sort | xargs md5sum 2>/dev/null | md5sum | cut -d' ' -f1)
+          echo "Current Frontend Fingerprint: $CURRENT_FINGERPRINT"
+
+          NEED_BUILD="false"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
+              echo "Decision: Manual Force Build."
+              NEED_BUILD="true"
+          elif [ ! -f "$OLD_FINGERPRINT" ]; then
+              echo "Decision: No frontend cache found. First time build."
+              NEED_BUILD="true"
+          elif [ "$CURRENT_FINGERPRINT" != "$(cat $OLD_FINGERPRINT 2>/dev/null)" ]; then
+              echo "Decision: Frontend source code changed."
+              NEED_BUILD="true"
+          else
+              echo "Decision: Frontend code identical. Skip build."
+              NEED_BUILD="false"
+          fi
+
+          echo "$CURRENT_FINGERPRINT" > "$OLD_FINGERPRINT" || true
+
+          if [ "$NEED_BUILD" = "true" ]; then
+              touch ./RUN_NODE_BUILD || true
+              [ -d "dist" ] && sudo rm -rf dist/ || rm -rf dist/ || true
+          fi
+
+          echo "code_changed=$NEED_BUILD" >> $GITHUB_OUTPUT
+          exit 0
+
+      - name: Setup Node.js
+        if: steps.filter.outputs.code_changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies and Build Vue
+        if: steps.filter.outputs.code_changed == 'true'
+        run: |
+          if [ -f "./RUN_NODE_BUILD" ]; then
+              echo "Executing NodeJS Build..."
+
+              export PATH=/usr/bin:/usr/local/bin:/bin:$PATH
+
+              node -v
+              npm -v
+
+              npm install --registry=https://registry.npmmirror.com
+
+              npm run build
+          else
+              echo "Skip NodeJS Build: Source code hash is unchanged."
+          fi
+
+      - name: Local Release and Nginx Link Management
+        if: steps.filter.outputs.code_changed == 'true'
+        run: |
+          export PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:$PATH
+
+          if [ -f "./RUN_NODE_BUILD" ]; then
+              echo "Action: Deploying New Frontend Version"
+
+              VUE_REL_DIR="/app/vue-cms/releases/${{ github.sha }}"
+              mkdir -p $VUE_REL_DIR
+
+              cp -r dist/* $VUE_REL_DIR/
+
+              ln -snf $VUE_REL_DIR /app/vue-cms/current
+
+              sudo rm -rf /var/www/vue-project
+
+              ln -snf /app/vue-cms/current /var/www/vue-project
+
+              cd /app/vue-cms/releases && ls -t | tail -n +6 | xargs rm -rf 2>/dev/null || true
+
+              echo "✅ Deployment successful!"
+
+              rm -f ./RUN_NODE_BUILD
+          else
+              echo "No deployment needed. Frontend is up to date."
+          fi
+
+      - name: Reload Nginx
+        if: steps.filter.outputs.code_changed == 'true'
+        run: |
+          sudo /usr/local/nginx/sbin/nginx -s reload
+          echo "✅ Nginx reloaded"
