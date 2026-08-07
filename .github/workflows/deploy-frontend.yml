@@ -105,18 +105,35 @@ jobs:
           if [ -f "./RUN_NODE_BUILD" ]; then
               echo "Action: Deploying New Frontend Version"
 
+              # 1. 确保发布目录存在
               VUE_REL_DIR="/app/vue-cms/releases/${{ github.sha }}"
-              mkdir -p $VUE_REL_DIR
+              sudo mkdir -p $VUE_REL_DIR
+              sudo chown -R deploy:deploy /app/vue-cms
 
+              # 2. 复制构建产物
               cp -r dist/* $VUE_REL_DIR/
+              echo "✅ Build artifacts copied to: $VUE_REL_DIR"
 
-              ln -snf $VUE_REL_DIR /app/vue-cms/current
+              # 3. 更新 current 软链接
+              sudo ln -snf $VUE_REL_DIR /app/vue-cms/current
+              echo "✅ Current link updated"
 
+              # 4. 更新 Nginx 根目录软链接
               sudo rm -rf /var/www/vue-project
+              sudo ln -snf /app/vue-cms/current /var/www/vue-project
+              echo "✅ Nginx root link updated"
 
-              ln -snf /app/vue-cms/current /var/www/vue-project
+              # 5. 验证软链接
+              ls -l /var/www/vue-project
+              ls -l /app/vue-cms/current
 
-              cd /app/vue-cms/releases && ls -t | tail -n +6 | xargs rm -rf 2>/dev/null || true
+              # 6. 清理旧版本（保留最近 5 个）
+              cd /app/vue-cms/releases
+              OLD_RELEASES=$(ls -t | tail -n +6 2>/dev/null || true)
+              if [ -n "$OLD_RELEASES" ]; then
+                  echo "🧹 Cleaning old releases: $OLD_RELEASES"
+                  echo "$OLD_RELEASES" | xargs -I {} sudo rm -rf {} 2>/dev/null || true
+              fi
 
               echo "✅ Deployment successful!"
 
@@ -128,5 +145,6 @@ jobs:
       - name: Reload Nginx
         if: steps.filter.outputs.code_changed == 'true'
         run: |
+          sudo /usr/local/nginx/sbin/nginx -t
           sudo /usr/local/nginx/sbin/nginx -s reload
           echo "✅ Nginx reloaded"
